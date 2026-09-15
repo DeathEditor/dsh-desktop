@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/tianfuhan/dsh-desktop.git"
+    "url": "https://github.com/DeathEditor/dsh-desktop.git"
   },
   "private": true,
   "main": "src/main.js",
