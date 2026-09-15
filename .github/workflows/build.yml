@@ -1,0 +1,140 @@
+name: Build desktop app
+
+# Builds the desktop shell on every platform GitHub offers runners for, and attaches
+# the resulting installers to the run. macOS builds MUST happen on macOS: Windows and
+# Linux cannot produce a usable .app (electron-builder refuses, and code signing plus
+# notarization are macOS-only).
+#
+# Trigger it by pushing a tag (creates a Release with the artifacts) or manually from
+# the Actions tab (artifacts only).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          # Runner labels verified against actions/runner-images:
+          #   macOS arm64 -> macos-14 / macos-15 / macos-latest
+          #   macOS Intel -> macos-15-intel (macos-13 is retired; macos-14 Intel is deprecated)
+          - name: macOS (Apple Silicon)
+            os: macos-14
+            args: --mac dmg zip --arm64
+            artifact: macos-arm64
+          - name: macOS (Intel)
+            os: macos-15-intel
+            args: --mac dmg zip --x64
+            artifact: macos-x64
+          - name: Windows
+            os: windows-latest
+            args: --win nsis portable
+            artifact: windows-x64
+          - name: Linux
+            os: ubuntu-latest
+            args: --linux AppImage deb
+            artifact: linux-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Electron's postinstall downloads a ~370 MB binary. `npm ci` can skip it under
+      # npm's allow-scripts policy, so install it explicitly and fail loudly if the
+      # binary is missing rather than producing a broken build.
+      - name: Install dependencies
+        run: |
+          npm install --no-audit --no-fund
+          node node_modules/electron/install.js
+        shell: bash
+
+      # A colon inside an unquoted YAML scalar starts a mapping, so multi-line shell
+      # snippets are always written as block scalars (`run: |`).
+      - name: Verify Electron binary is present
+        shell: bash
+        run: |
+          node -e "const p=require('electron');const fs=require('fs');if(!fs.existsSync(p))throw new Error('electron binary missing at '+p);console.log('electron binary OK')"
+
+      # Generates assets/icon.ico + icon.png from the dsh favicon.
+      #
+      # The generator is PowerShell and it renders through headless Chrome, neither of
+      # which is a safe assumption on a runner. The committed icons are what the build
+      # actually uses; this step only refreshes them where the tooling exists, and is
+      # allowed to fail so a missing renderer never blocks a release.
+      - name: Regenerate icons (best effort)
+        run: |
+          if command -v pwsh >/dev/null 2>&1; then
+            pwsh -NoProfile -File build/make-icons.ps1 || echo "icon generation skipped"
+          else
+            echo "pwsh unavailable - using the committed icons in assets/"
+          fi
+        shell: bash
+        continue-on-error: true
+
+      # A quick sanity check that the sources parse before spending time packaging.
+      - name: Syntax check
+        run: |
+          node --check src/main.js
+          node --check src/server-host.js
+          node --check src/settings.js
+          node --check src/loading.js
+          node --check build/verify-contract.js
+        shell: bash
+
+      # Unsigned by default. To sign and notarize, add the usual Apple secrets and the
+      # signing env vars electron-builder reads (CSC_LINK / CSC_KEY_PASSWORD, plus
+      # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID for notarization).
+      - name: Build
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        shell: bash
+        env:
+          # Nothing to sign with in CI by default; skip the auto-discovery attempt so a
+          # missing certificate is not an error.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
+
+  release:
+    name: Attach to release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what will be published
+        run: ls -la artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: true
+          generate_release_notes: true
