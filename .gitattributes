@@ -1,0 +1,16 @@
+# Normalize line endings so the repo behaves the same on every platform.
+#
+# This matters here because CI runs the same scripts on Windows, macOS and Linux:
+# a shell script or YAML file checked out with CRLF breaks on the Unix runners, and
+# a CRLF shebang line fails with "bad interpreter".
+* text=auto eol=lf
+
+# Windows-only tooling may keep CRLF without harming anything.
+*.ps1 text eol=crlf
+
+# Binary assets must never be converted.
+*.ico binary
+*.png binary
+*.icns binary
+*.dmg binary
+*.exe binary
