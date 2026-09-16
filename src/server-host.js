@@ -33,18 +33,24 @@ const DEFAULT_TIMEOUT_MS = 120000
 /**
  * Locate the installed dsh CLI entry point.
  *
- * Resolution order: an explicit override, then the npm global root, then the
- * platform's conventional global locations. Returns null when nothing is found so
- * the caller can show an actionable message.
+ * Resolution order: an explicit override, then the `dsh` the user's own shell would
+ * run, then the npm global root, then the platform's conventional global locations.
+ * Returns null when nothing is found so the caller can show an actionable message.
  */
 function resolveDshBin (override) {
   const candidates = []
 
   if (override) candidates.push(override)
 
+  const home = os.homedir()
+
+  // The `dsh` on PATH outranks the npm prefixes below, because that is the CLI the user
+  // actually runs — and it is the only way to find one that is not in an npm prefix at
+  // all, such as a source build symlinked into ~/.local/bin.
+  candidates.push(...pathDshCandidates(home))
+
   // npm's global root, the same way `npm root -g` reports it.
   const appData = process.env.APPDATA
-  const home = os.homedir()
 
   if (process.platform === 'win32') {
     if (appData) candidates.push(path.join(appData, 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
@@ -67,6 +73,67 @@ function resolveDshBin (override) {
   }
 
   return candidates.find(isFile) || null
+}
+
+/**
+ * Candidate CLI entries found by looking for a `dsh` executable on the user's PATH.
+ *
+ * What turns up this way is normally a symlink — npm's global install, `npm link`, or a
+ * manual link into a source checkout — so it is resolved before use: the server is
+ * started as `node <entry>.js`, and a symlink's own path is not that file. Anything
+ * that does not resolve to a `.js` file is skipped rather than guessed at, which is
+ * what keeps a Windows `dsh.cmd` shim (a batch script) from being handed to node; those
+ * fall through to the npm-prefix guesses above.
+ */
+function pathDshCandidates (home) {
+  const found = []
+  for (const dir of dshSearchDirs(home)) {
+    const link = path.join(dir, 'dsh')
+    if (!isFile(link)) continue
+    const real = realpathOrNull(link)
+    if (real && real.endsWith('.js')) found.push(real)
+  }
+  return found
+}
+
+/**
+ * Directories worth looking in for the `dsh` launcher, best guess first.
+ *
+ * PATH alone is not enough. A GUI-launched macOS app is started by launchd, so it
+ * inherits launchd's minimal default (/usr/bin:/bin:/usr/sbin:/sbin) rather than the
+ * login shell's PATH — a per-user install, which is exactly what a source build or
+ * `npm link` produces, is invisible to it. The extra prefixes below cover that case.
+ */
+function dshSearchDirs (home) {
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+
+  if (process.platform === 'win32') {
+    if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'))
+    if (process.env.ProgramFiles) dirs.push(path.join(process.env.ProgramFiles, 'nodejs'))
+    return dirs
+  }
+
+  dirs.push(
+    path.join(home, '.local', 'bin'),
+    path.join(home, 'bin'),
+    path.join(home, '.npm-global', 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin'
+  )
+
+  // Version managers put each toolchain's globally installed bins next to node itself,
+  // and keep node outside every directory listed above.
+  for (const node of versionManagerNodes(home)) dirs.push(path.dirname(node))
+
+  return dirs
+}
+
+function realpathOrNull (p) {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return null
+  }
 }
 
 /** Ask npm for its global root. Returns null when npm is unavailable. */
@@ -227,7 +294,7 @@ class ServerHost {
       throw new Error(
         'Could not find the dsh CLI.\n\n' +
         'Install it with:\n    npm install -g @deepseek-ai/dsh\n\n' +
-        'If it is installed somewhere unusual, set "DshBinPath" in settings.json.'
+        'If it is installed somewhere unusual, set "dshBinPath" in settings.json.'
       )
     }
     this.binPath = bin
