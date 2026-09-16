@@ -206,8 +206,14 @@ here, in order of discovery:
    `if (qualifier === "-")`. With no certificate in the keychain and `identity` unset,
    it takes the `noIdentity` branch instead, where `reportError()` merely **logs a
    warning and returns null** — the build reports success and ships an unsigned
-   bundle. CI now passes `--config.mac.identity=-` explicitly (via a dot-notation
-   override, so nothing is hardcoded and a real certificate still takes precedence).
+   bundle.
+
+Both CI and the local scripts now pass `--config.mac.identity=-`, but only when no
+certificate is configured. The condition is not optional: `identity: "-"` takes
+precedence *over* `CSC_LINK`, because `findSigningIdentity()` matches the qualifier
+against the keychain (nothing there is named `-`), gets null, and then forces the
+ad-hoc identity anyway. So CI adds the flag only when `CSC_LINK` is empty, and
+`npm run dist` / `npm run pack` do the same through `build/run-electron-builder.js`.
 
 `build/entitlements.mac.plist` and `build/entitlements.mac.inherit.plist` are
 auto-detected by electron-builder and carry the JIT entitlements Electron needs plus

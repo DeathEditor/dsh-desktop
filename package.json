@@ -20,8 +20,8 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "icons": "powershell -NoProfile -ExecutionPolicy Bypass -File build/make-icons.ps1",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "pack": "node build/run-electron-builder.js --dir",
+    "dist": "node build/run-electron-builder.js"
   },
   "devDependencies": {
     "electron": "^44.3.0",
