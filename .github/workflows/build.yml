@@ -103,16 +103,42 @@ jobs:
       # Unsigned by default. To sign and notarize, add the usual Apple secrets and the
       # signing env vars electron-builder reads (CSC_LINK / CSC_KEY_PASSWORD, plus
       # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID for notarization).
+      # macOS signing, when no Developer ID certificate is configured.
+      #
+      # electron-builder only takes its ad-hoc signing path when `identity` is
+      # EXPLICITLY "-" (MacTargetHelper.js: `if (qualifier === "-")`). Left unset with
+      # no certificate in the keychain, it logs a warning and SKIPS signing entirely,
+      # leaving an unsealed bundle — which macOS reports as "the app is damaged and
+      # can't be opened", and which `codesign --verify` below then rejects with
+      # "code has no resources but signature indicates they must be present".
+      #
+      # An ad-hoc signature is not trusted by Gatekeeper, but it does seal the bundle
+      # consistently, which is what makes the app launchable after the user clears the
+      # quarantine flag.
+      #
+      # Skipped automatically once CSC_LINK is provided, so adding a real certificate
+      # needs no workflow change.
       - name: Build
-        run: npx electron-builder ${{ matrix.args }} --publish never
-        shell: bash
         env:
-          # macOS needs auto-discovery ON so electron-builder can fall back to an
-          # ad-hoc signature. Turning it off leaves the bundle unsealed, which macOS
-          # reports as "the app is damaged" — that was a real reported failure.
-          #
-          # Windows has nothing to discover in CI, so it stays off there.
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.os == 'windows-latest' && 'false' || 'true' }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+        shell: bash
+        run: |
+          set -eo pipefail
+
+          # `${EXTRA[@]}` on an empty array is an unbound-variable error under
+          # `set -u`, and macOS runners default to bash 3.2 where this bites even
+          # with newer syntax. So build the argument list as a plain string instead.
+          EXTRA=""
+          if [ "${{ startsWith(matrix.os, 'macos') }}" = "true" ] && [ -z "${CSC_LINK:-}" ]; then
+            echo "No CSC_LINK secret set: requesting an ad-hoc macOS signature."
+            EXTRA="--config.mac.identity=-"
+          elif [ "${{ startsWith(matrix.os, 'macos') }}" = "true" ]; then
+            echo "CSC_LINK present: signing with the provided certificate."
+          fi
+
+          # shellcheck disable=SC2086
+          npx electron-builder ${{ matrix.args }} --publish never $EXTRA
 
       # Prove the macOS bundle is sealed before shipping it. An unsealed or
       # wrongly-signed .app installs fine and then fails at launch with "the app is

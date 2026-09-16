@@ -177,33 +177,46 @@ keeps normal click behaviour and matches every other app on the machine.
 
 ## Signing and notarization
 
-CI builds are **ad-hoc signed**: no Apple Developer certificate is configured, so
-electron-builder falls back to signing with the ad-hoc identity (`-`). That is enough
-to make the bundle internally consistent, but *not* enough for Gatekeeper to trust it
-— hence the first-launch step above.
+CI builds are **ad-hoc signed**: no Apple Developer certificate is configured, so CI
+passes `--config.mac.identity=-` and electron-builder signs with the ad-hoc identity.
+That makes the bundle internally consistent, but *not* trusted by Gatekeeper — hence
+the first-launch step above.
 
 ### macOS signing: why the app must be sealed
 
-An unsigned or half-signed `.app` does not fail with "unidentified developer". It
-fails with **"the app is damaged and can't be opened"**, because macOS cannot verify
-the bundle seal at all. Two things caused exactly that here:
+An unsealed `.app` does not fail with "unidentified developer". It fails with **"the
+app is damaged and can't be opened"**, because macOS cannot verify the bundle seal at
+all — and right-click → Open cannot override that. Three things caused exactly that
+here, in order of discovery:
 
-1. **`CSC_IDENTITY_AUTO_DISCOVERY: false` in CI.** This suppresses signing entirely,
-   leaving the bundle unsealed. It is now `true` on macOS so the ad-hoc path is taken.
-2. **Hardened Runtime + ad-hoc signing.** electron-builder's own documentation is
-   explicit: *"When using ad-hoc signing (`identity: "-"`), hardened runtime enforces
-   library validation which will reject pre-signed Electron frameworks that carry a
-   different Team ID."* Electron's frameworks are signed by Electron's team, so an
-   ad-hoc shell aborts on launch. Fixed by `hardenedRuntime: false` plus the
+1. **Hardened Runtime combined with ad-hoc signing.** electron-builder's own
+   documentation is explicit: *"When using ad-hoc signing (`identity: "-"`), hardened
+   runtime enforces library validation which will reject pre-signed Electron
+   frameworks that carry a different Team ID."* Electron's frameworks are signed by
+   Electron's team, so an ad-hoc shell aborts on launch. Fixed by
+   `hardenedRuntime: false` plus the
    `com.apple.security.cs.disable-library-validation` entitlement.
+
+2. **`CSC_IDENTITY_AUTO_DISCOVERY: false`.** This suppresses the certificate lookup
+   entirely, which is not the same as "sign ad-hoc". Removed.
+
+3. **`identity` was never set, so signing was skipped altogether.** This is the subtle
+   one, and the real reason the bundle ended up unsealed:
+   `app-builder-lib/out/mac/MacTargetHelper.js` only enters the ad-hoc branch on
+   `if (qualifier === "-")`. With no certificate in the keychain and `identity` unset,
+   it takes the `noIdentity` branch instead, where `reportError()` merely **logs a
+   warning and returns null** — the build reports success and ships an unsigned
+   bundle. CI now passes `--config.mac.identity=-` explicitly (via a dot-notation
+   override, so nothing is hardcoded and a real certificate still takes precedence).
 
 `build/entitlements.mac.plist` and `build/entitlements.mac.inherit.plist` are
 auto-detected by electron-builder and carry the JIT entitlements Electron needs plus
 the library-validation exemption.
 
-CI now runs `codesign --verify --deep --strict` on the produced `.app` and fails the
-build if it is not properly sealed, so this class of bug cannot reach a download link
-again.
+CI runs `codesign --verify --deep --strict` on the produced `.app` and fails the build
+if it is not properly sealed. That check is what surfaced cause 3, via
+`code has no resources but signature indicates they must be present` — the signature
+recorded resources that the unsigned bundle never sealed.
 
 ### Enabling real signing
 
