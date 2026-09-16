@@ -102,9 +102,31 @@ jobs:
         run: npx electron-builder ${{ matrix.args }} --publish never
         shell: bash
         env:
-          # Nothing to sign with in CI by default; skip the auto-discovery attempt so a
-          # missing certificate is not an error.
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+          # macOS needs auto-discovery ON so electron-builder can fall back to an
+          # ad-hoc signature. Turning it off leaves the bundle unsealed, which macOS
+          # reports as "the app is damaged" — that was a real reported failure.
+          #
+          # Windows has nothing to discover in CI, so it stays off there.
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.os == 'windows-latest' && 'false' || 'true' }}
+
+      # Prove the macOS bundle is sealed before shipping it. An unsealed or
+      # wrongly-signed .app installs fine and then fails at launch with "the app is
+      # damaged", which is unfixable from the user's side. Catch it here instead.
+      - name: Verify macOS signature
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find dist -maxdepth 3 -name '*.app' -print -quit)
+          if [ -z "$APP" ]; then echo "no .app bundle produced"; exit 1; fi
+          echo "verifying: $APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "--- signature details ---"
+          codesign -dv --verbose=4 "$APP" 2>&1 | sed -n '1,25p'
+          echo "--- hardened runtime / entitlements ---"
+          codesign -d --entitlements - "$APP" 2>&1 | sed -n '1,40p' || true
+          echo "--- Gatekeeper assessment (expected to be rejected: not notarized) ---"
+          spctl --assess --type execute --verbose=4 "$APP" || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

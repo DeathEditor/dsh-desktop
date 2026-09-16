@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Entitlements for an Electron app under the Hardened Runtime.
+
+    V8 needs a writable+executable region for its JIT.
+  -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+
+  <!--
+    Electron allocates unsigned executable memory in some code paths (and the
+    renderer relies on it during startup), so this must stay allowed.
+  -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!--
+    Required when the app is AD-HOC signed (no Developer ID certificate), which is
+    how CI builds are produced here. Without it, the Hardened Runtime refuses to load
+    libraries that are not signed by the same identity, and the app aborts on launch
+    with a "damaged" / "cannot be opened" error.
+
+    Harmless for a properly Developer ID signed build, so it stays in place.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- The shell talks to the local dsh server over HTTP on 127.0.0.1. -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+</dict>
+</plist>

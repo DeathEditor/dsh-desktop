@@ -31,11 +31,21 @@ Builds are produced by GitHub Actions. Either:
 
 ### First launch on macOS
 
-The builds are **unsigned** (see [Signing](#signing-and-notarization)), so Gatekeeper
-will refuse the first open. Either:
+The builds are **ad-hoc signed** (no Apple Developer certificate), so Gatekeeper
+blocks the first open. Two ways in:
 
 * right-click the app → **Open** → **Open** again, or
-* `xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`
+* remove the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"
+```
+
+If macOS instead says **"the app is damaged and can't be opened"**, that is a
+*different* failure, and right-click → Open will not help: it means the bundle is not
+sealed correctly rather than merely untrusted. See
+[macOS signing](#macos-signing-why-the-app-must-be-sealed) for the cause. Builds from
+this repo carry a valid ad-hoc signature, and CI verifies it before publishing.
 
 ### Prerequisite on every platform
 
@@ -149,20 +159,48 @@ keeps normal click behaviour and matches every other app on the machine.
 
 ## Signing and notarization
 
-CI builds are **unsigned**: no certificates are configured, and
-`CSC_IDENTITY_AUTO_DISCOVERY` is disabled so a missing certificate is not an error.
+CI builds are **ad-hoc signed**: no Apple Developer certificate is configured, so
+electron-builder falls back to signing with the ad-hoc identity (`-`). That is enough
+to make the bundle internally consistent, but *not* enough for Gatekeeper to trust it
+— hence the first-launch step above.
 
-To sign and notarize, add the standard secrets and let electron-builder pick them up:
+### macOS signing: why the app must be sealed
 
-| Variable | Purpose |
+An unsigned or half-signed `.app` does not fail with "unidentified developer". It
+fails with **"the app is damaged and can't be opened"**, because macOS cannot verify
+the bundle seal at all. Two things caused exactly that here:
+
+1. **`CSC_IDENTITY_AUTO_DISCOVERY: false` in CI.** This suppresses signing entirely,
+   leaving the bundle unsealed. It is now `true` on macOS so the ad-hoc path is taken.
+2. **Hardened Runtime + ad-hoc signing.** electron-builder's own documentation is
+   explicit: *"When using ad-hoc signing (`identity: "-"`), hardened runtime enforces
+   library validation which will reject pre-signed Electron frameworks that carry a
+   different Team ID."* Electron's frameworks are signed by Electron's team, so an
+   ad-hoc shell aborts on launch. Fixed by `hardenedRuntime: false` plus the
+   `com.apple.security.cs.disable-library-validation` entitlement.
+
+`build/entitlements.mac.plist` and `build/entitlements.mac.inherit.plist` are
+auto-detected by electron-builder and carry the JIT entitlements Electron needs plus
+the library-validation exemption.
+
+CI now runs `codesign --verify --deep --strict` on the produced `.app` and fails the
+build if it is not properly sealed, so this class of bug cannot reach a download link
+again.
+
+### Enabling real signing
+
+Add these repository secrets and electron-builder will pick them up automatically:
+
+| Secret | Purpose |
 | --- | --- |
-| `CSC_LINK` | base64 `.p12` developer certificate |
+| `CSC_LINK` | base64 `.p12` Developer ID Application certificate |
 | `CSC_KEY_PASSWORD` | its password |
 | `APPLE_ID` | Apple ID for notarization |
 | `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password |
 | `APPLE_TEAM_ID` | team identifier |
 
-Then remove `CSC_IDENTITY_AUTO_DISCOVERY: false` from the workflow's build step.
+Then set `hardenedRuntime` back to `true` (it is required for notarization) — the
+library-validation exemption stays, and is harmless for a real certificate.
 
 ---
 
