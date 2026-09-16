@@ -2,7 +2,7 @@
   "name": "dsh-desktop",
   "productName": "DeepSeek Harness",
   "version": "1.0.0",
-  "description": "Desktop shell for the DeepSeek Harness web GUI: one-click launch, no console, everything stops when the window closes. Cross-platform (Windows / macOS / Linux).",
+  "description": "Desktop shell for the DeepSeek Harness web GUI: one-click launch, no console, everything stops when the window closes. Cross-platform (Windows / macOS).",
   "license": "MIT",
   "author": {
     "name": "tianfuhan"
@@ -13,6 +13,9 @@
   },
   "private": true,
   "main": "src/main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
@@ -55,14 +58,6 @@
       "hardenedRuntime": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist"
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "icon": "assets/icon.png",
-      "category": "Development"
     },
     "nsis": {
       "oneClick": false,

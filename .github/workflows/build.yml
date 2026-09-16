@@ -1,12 +1,14 @@
 name: Build desktop app
 
-# Builds the desktop shell on every platform GitHub offers runners for, and attaches
-# the resulting installers to the run. macOS builds MUST happen on macOS: Windows and
-# Linux cannot produce a usable .app (electron-builder refuses, and code signing plus
-# notarization are macOS-only).
+# Builds the desktop shell for Windows and macOS, and attaches the resulting
+# installers to the run.
 #
-# Trigger it by pushing a tag (creates a Release with the artifacts) or manually from
-# the Actions tab (artifacts only).
+# macOS builds MUST happen on macOS: electron-builder refuses to cross-build a .app
+# from Windows or Linux, and code signing is macOS-only. Hence one job per platform
+# in the matrix rather than a single cross-building job.
+#
+# Trigger by pushing a tag (creates a Release with the artifacts) or manually from the
+# Actions tab (artifacts only).
 
 on:
   push:
@@ -41,17 +43,20 @@ jobs:
             os: windows-latest
             args: --win nsis portable
             artifact: windows-x64
-          - name: Linux
-            os: ubuntu-latest
-            args: --linux AppImage deb
-            artifact: linux-x64
 
     steps:
-      - uses: actions/checkout@v4
+      # Action majors are pinned to the releases that run on the runner's current
+      # Node runtime. Older majors (checkout@v4, upload-artifact@v4, setup-node@v4)
+      # still execute on node20, which GitHub now warns about on every run.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      # Node 24: electron@44 declares `engines.node >= 22.12.0`, and several
+      # transitive dependencies (abbrev, brace-expansion) accept only 20 || >=22 or
+      # newer. Pinning 24 keeps the build on a version every dependency supports and
+      # silences the engine warnings older runtimes produced.
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: '24'
 
       # Electron's postinstall downloads a ~370 MB binary. `npm ci` can skip it under
       # npm's allow-scripts policy, so install it explicitly and fail loudly if the
@@ -129,17 +134,16 @@ jobs:
           spctl --assess --type execute --verbose=4 "$APP" || true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
           retention-days: 30
+          # Windows and macOS only: no Linux target is produced.
           path: |
             dist/*.dmg
             dist/*.zip
             dist/*.exe
-            dist/*.AppImage
-            dist/*.deb
 
   release:
     name: Attach to release
@@ -147,7 +151,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -155,7 +159,7 @@ jobs:
       - name: List what will be published
         run: ls -la artifacts
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           draft: true

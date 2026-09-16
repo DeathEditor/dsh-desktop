@@ -4,11 +4,13 @@ A cross-platform desktop shell for the [DeepSeek Harness](https://github.com/dee
 web GUI: one click to launch, no console window, and everything stops when you close
 the window.
 
-Runs on **Windows, macOS and Linux** from one codebase (Electron).
+Runs on **Windows and macOS** from one codebase (Electron). The code is written
+portably and the Linux paths are implemented, but no Linux package is built or
+tested — see [Platform support](#platform-support).
 
 | | |
 | --- | --- |
-| One-click launch | packaged `.exe` / `.dmg` / `.AppImage` |
+| One-click launch | packaged `.exe` / `.dmg` |
 | No console window | GUI subsystem — nothing to hide |
 | Close the window | server stops, port is freed, no orphan processes |
 | UI engine | Chromium — identical rendering to the browser target |
@@ -27,7 +29,6 @@ Builds are produced by GitHub Actions. Either:
 | Windows | `DeepSeek Harness Setup x.y.z.exe` (installer) or the portable `.exe` |
 | macOS (Apple Silicon) | `…-arm64.dmg` |
 | macOS (Intel) | `…-x64.dmg` |
-| Linux | `.AppImage` or `.deb` |
 
 ### First launch on macOS
 
@@ -62,6 +63,10 @@ the CLI with its own bundled runtime.
 
 ## Build from source
 
+**Requires Node.js 22.12 or newer** (`engines.node`). `electron@44` declares that
+floor, and several transitive dependencies accept only `20 || >=22`; Node 24 is what
+CI uses and is the recommended choice.
+
 ```bash
 npm install
 node node_modules/electron/install.js   # downloads the Electron binary (~370 MB)
@@ -74,9 +79,22 @@ npm run dist                           # package for the current platform
 > the download.
 
 `npm run dist` builds for the **host** platform only. Cross-building macOS targets
-from Windows or Linux is not supported by electron-builder — use the CI workflow,
-which builds each platform on its own runner. That is also the only way to sign and
-notarize a macOS build.
+from Windows is not supported by electron-builder — use the CI workflow, which builds
+each platform on its own runner. That is also the only way to sign and notarize a
+macOS build.
+
+### Platform support
+
+| Platform | Packaged | Tested |
+| --- | --- | --- |
+| Windows | yes (NSIS + portable) | yes |
+| macOS (arm64 / Intel) | yes (dmg + zip) | no — see below |
+| Linux | no target configured | no |
+
+The Linux code paths exist and are the documented cross-platform ones (process
+groups for cleanup, `~/.config` for settings), but no Linux package is built, so the
+target was removed from `package.json` and from CI rather than shipping something
+untested.
 
 ---
 
