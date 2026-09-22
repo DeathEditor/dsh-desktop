@@ -96,13 +96,20 @@ jobs:
         continue-on-error: true
 
       # A quick sanity check that the sources parse before spending time packaging.
+      # Globbed rather than listed: a hand-maintained list silently stops covering
+      # new modules, which is exactly when a syntax error reaches the packager.
       - name: Syntax check
         run: |
-          node --check src/main.js
-          node --check src/server-host.js
-          node --check src/settings.js
-          node --check src/loading.js
-          node --check build/verify-contract.js
+          for file in src/*.js build/*.js; do
+            node --check "$file"
+          done
+        shell: bash
+
+      # Pure-logic tests: discovery, npm prefix layouts, launch planning, runtime
+      # selection. Cheap (no process is booted) and catches the class of mistake
+      # that otherwise only shows up as a splash screen that never finishes.
+      - name: Run tests
+        run: npm test
         shell: bash
 
       # Unsigned by default. To sign and notarize, add the usual Apple secrets and the
