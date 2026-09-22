@@ -57,7 +57,20 @@ npm install -g @deepseek-ai/dsh
 ```
 
 Node.js is **not** separately required — if no system `node` is found, the app runs
-the CLI with its own bundled runtime.
+the CLI with its own bundled runtime (see [Finding the engine](#finding-the-engine)).
+
+**You do not have to install it by hand.** If the app starts and cannot find a usable
+`dsh`, it shows a setup screen offering two ways forward:
+
+1. **Install it for me** — runs the npm install, falling back to a private prefix if the
+   global one needs administrator rights, so no password is ever required.
+2. **Use a folder I already have** — point it at a `deepseek-harness` checkout (built
+   output if present, otherwise the TypeScript sources via `tsx`) or at an installed
+   `@deepseek-ai/dsh` folder.
+
+Nothing is accepted on trust: whichever option is used, the installation is booted once
+before the app continues, so a folder that "looks right" but cannot run is reported
+there and then rather than as a splash screen that never finishes.
 
 ---
 
@@ -122,6 +135,64 @@ the server owns its lifetime.
 
 ---
 
+## Finding the engine
+
+The app has to locate a working `dsh` before it can start anything, and "found a file"
+is not the same as "found an installation that runs". Discovery and validation are
+therefore separate steps.
+
+**Discovery order** (`src/dsh-locate.js`), best guess first:
+
+1. an explicit path — `dshBinPath` in `settings.json`, or a folder chosen in the setup
+   screen;
+2. a `dsh` executable on `PATH`, resolving symlinks — this is the CLI the user actually
+   runs, and the only way to find one outside an npm prefix, such as a source build
+   linked into `~/.local/bin`;
+3. a source checkout in the usual places (`~/GitRepo/deepseek-harness`, `~/Projects/…`,
+   and friends);
+4. npm's global root, then the platform's conventional global prefixes.
+
+A GUI-launched macOS app is started by launchd, so it inherits
+`/usr/bin:/bin:/usr/sbin:/sbin` rather than the login shell's `PATH`. `~/.local/bin`,
+`~/bin`, version-manager bin directories and the checkout locations above are searched
+explicitly for that reason.
+
+**Validation** then boots each candidate for real (`dsh web` on an ephemeral port, under
+a throwaway `DSH_HOME`) and waits for the `dsh web: <url>` line *and* for the process to
+still be healthy a moment later. Two things this catches that a cheaper check does not:
+
+* the launch contract this shell depends on, verified against the exact installation
+  rather than assumed from a version number;
+* an installation whose plugin tree cannot load. `dsh web --help` exits 0 in that case
+  because it never composes the plugins, so it would report a broken install as fine.
+
+If nothing validates, the setup screen opens with the reason attached.
+
+### Source checkouts
+
+A `deepseek-harness` clone is supported directly, which matters because that is what
+following the repository's own instructions produces:
+
+| Checkout state | How it is launched |
+| --- | --- |
+| Built (`apps/cli/lib/bin.js` present) | `node apps/cli/lib/bin.js` — no loader needed |
+| Not built, dependencies installed | `node --import <tsx> apps/cli/src/bin.ts` with `TSX_TSCONFIG_PATH` pointed at the checkout's tsconfig, so the `paths` aliases resolve |
+| Neither | Not runnable; the setup screen says which command to run (`pnpm install`, `pnpm run build`) |
+
+`TSX_TSCONFIG_PATH` is not optional: tsx otherwise looks for a tsconfig next to the
+*working directory*, which for a GUI-launched app is nothing like the checkout, and the
+CLI then dies on its first bare workspace import.
+
+### When there is no system Node
+
+The bundled Electron runtime is the last-resort fallback, started with
+`ELECTRON_RUN_AS_NODE=1`. It also needs `--expose-internals` on the command line —
+without it `dsh`'s HMR plugin fails to load (`--expose-internals is required for HMR
+service`) and the whole profile fails. Plain Node always exposes internals, so the flag
+is added only for Electron, and as a real argv entry because `NODE_OPTIONS` rejects it.
+
+---
+
 ## Process cleanup
 
 Closing the window stops the server on every path: `window-all-closed`,
@@ -156,9 +227,17 @@ Open it from the app: **Help → Open Settings Folder**.
 | `port` | Preferred port; falls back to `lastPort`, then an OS-assigned one |
 | `lastPort` | Written automatically; keeps the UI origin stable |
 | `bounds`, `maximized` | Window geometry, saved on move/resize/close |
-| `dshBinPath` | Explicit path to `@deepseek-ai/dsh/lib/bin.js` (else auto-discovered) |
+| `dshBinPath` | The installation in use; written when one is discovered or chosen in the setup screen |
+| `dshVersion` | Its version, shown in the About box |
 | `dshHome` | Alternate `DSH_HOME` to run against (else your default) |
 | `theme` | `system` (default) or `dark` — see below |
+
+To point the app at a different installation without editing the file, use
+**Help → Change Engine…**; it opens the same setup screen and restarts the app when you
+confirm. `--setup` on the command line opens it directly at startup, and
+**Help → Open Settings Folder** reveals `settings.json`. The private install location
+used when a global npm install is not permitted is `<userData>/cli` — delete that folder
+to uninstall it.
 
 ### About the title bar on Windows
 
@@ -262,6 +341,14 @@ the same two-step handshake a browser does — token URL → 302 + `Set-Cookie` 
 replayed against `/` → HTTP 200. Non-zero exit on failure, with the captured output
 printed so the regex can be fixed.
 
+It resolves the installation through the same discovery the app uses, and launches it
+with the same command line, so it verifies a source checkout through its loader as
+readily as a packaged install:
+
+```bash
+node build/verify-contract.js --bin /path/to/deepseek-harness
+```
+
 Verified compatible with dsh **0.1.5-rc.1**, **0.1.5-rc.2**, **0.1.6-alpha.1**.
 
 > Run it from a separate terminal, not from inside the app: the single-instance lock
@@ -275,6 +362,12 @@ Verified compatible with dsh **0.1.5-rc.1**, **0.1.5-rc.2**, **0.1.6-alpha.1**.
 src/
   main.js           Electron main process: window, menu, lifecycle, cleanup
   server-host.js    spawns `dsh web`, scrapes the token URL, kills the tree
+  dsh-launch.js     describes an installation and turns it into a command line
+  dsh-locate.js     finds installations, validates them by booting one
+  dsh-install.js    one-click npm install, with a private-prefix fallback
+  node-runtime.js   locating the Node (or Electron) runtime to run the CLI with
+  setup-flow.js     main-process side of the first-run setup screen
+  setup.html/.js    the setup screen itself (preload: setup-preload.js)
   settings.js       settings.json persistence (atomic write)
   loading.html/.js  splash screen shown while the server boots
 build/

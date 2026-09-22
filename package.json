@@ -19,6 +19,9 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "setup": "electron . --setup",
+    "test": "node build/test-locate.js",
+    "verify": "node build/verify-contract.js",
     "icons": "powershell -NoProfile -ExecutionPolicy Bypass -File build/make-icons.ps1",
     "pack": "node build/run-electron-builder.js --dir",
     "dist": "node build/run-electron-builder.js"

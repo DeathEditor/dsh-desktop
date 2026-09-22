@@ -25,6 +25,8 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { LAUNCH_URL_RE, resolveDshBin, resolveNode } = require('../src/server-host')
+const { locate } = require('../src/dsh-locate')
+const { spawnPlan } = require('../src/dsh-launch')
 
 const argv = process.argv.slice(2)
 const binFlag = argv.indexOf('--bin')
@@ -37,17 +39,21 @@ function record (name, ok, detail = '') {
 }
 
 async function main () {
-  const bin = resolveDshBin(explicitBin)
+  // Resolve through the same discovery the app uses, so this verifies the installation
+  // the shell would actually launch — including a source checkout, which is launched
+  // through a loader rather than plain `node <bin.js>`.
+  const descriptor = locate(explicitBin)
+  const bin = descriptor?.entry || null
   const node = resolveNode()
   let version = 'unknown'
-  if (bin) {
+  if (descriptor) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(path.resolve(path.dirname(bin), '..', 'package.json'), 'utf8'))
-      version = pkg.version || 'unknown'
+      version = require('../src/dsh-locate').readVersion(descriptor)
     } catch { /* reported below */ }
   }
 
   console.log(`dsh entry  : ${bin || '(not found)'}`)
+  console.log(`dsh kind   : ${descriptor ? descriptor.kind + (descriptor.fromCheckout ? ' (checkout)' : '') : '-'}`)
   console.log(`dsh version: ${version}`)
   console.log(`node       : ${node.cmd}${node.needsRunAsNode ? ' (Electron as Node)' : ''}`)
   console.log('')
@@ -56,7 +62,11 @@ async function main () {
   if (!bin) return report()
 
   // --- flags the shell passes must still be accepted ---
-  const help = await run(node, [bin, 'web', '--help'])
+  const helpPlan = spawnPlan(descriptor)
+  const help = await run(helpPlan.cmd, [...helpPlan.args, 'web', '--help'], {
+    env: helpPlan.env,
+    cwd: helpPlan.cwd
+  })
   record('`dsh web` accepts --no-open', /--no-open/.test(help.stdout + help.stderr))
   record('`dsh web` accepts --port', /--port/.test(help.stdout + help.stderr))
 
@@ -67,15 +77,14 @@ async function main () {
 
   let url = null
   let stderr = ''
-  // Mirror the shell's own spawn: same runtime, same env handling.
-  const childEnv = { ...process.env, DSH_HOME: tempHome, NO_COLOR: '1' }
-  delete childEnv.ELECTRON_NO_ATTACH_CONSOLE
-  if (node.needsRunAsNode) childEnv.ELECTRON_RUN_AS_NODE = '1'
-  else delete childEnv.ELECTRON_RUN_AS_NODE
+  // Mirror the shell's own spawn exactly: same runtime, same loader, same env handling.
+  const plan = spawnPlan(descriptor)
+  const childEnv = { ...plan.env, DSH_HOME: tempHome }
 
-  const child = spawn(node.cmd, [bin, 'web', '--no-open', '--port', '0'], {
+  const child = spawn(plan.cmd, [...plan.args, 'web', '--no-open', '--port', '0'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    cwd: plan.cwd,
     env: childEnv
   })
 
@@ -174,10 +183,17 @@ function report (version = '') {
   }
 }
 
-/** Run a command to completion, capturing stdout/stderr. */
-function run (cmd, args) {
+/**
+ * Run a command to completion, capturing stdout/stderr.
+ *
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {object} [options] env/cwd to run with — a source checkout needs both, so the
+ *   help probe has to use the same ones the real launch does.
+ */
+function run (cmd, args, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { windowsHide: true })
+    const child = spawn(cmd, args, { windowsHide: true, env: options.env, cwd: options.cwd })
     let stdout = ''
     let stderr = ''
     child.stdout?.setEncoding('utf8')

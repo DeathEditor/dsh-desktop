@@ -20,6 +20,12 @@ const DEFAULTS = {
   maximized: false,
   /** Explicit paths; empty means "discover automatically". */
   dshBinPath: '',
+  /**
+   * Version of the installation named by dshBinPath, written whenever one is selected
+   * or discovered. Displayed in the About box; never used to make decisions, because
+   * the authoritative version is whatever the CLI reports when it is run.
+   */
+  dshVersion: '',
   /** Alternate DSH_HOME to run against; empty means the user's default. */
   dshHome: '',
   /**

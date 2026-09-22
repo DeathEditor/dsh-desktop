@@ -20,6 +20,8 @@ const path = require('node:path')
 
 const { ServerHost } = require('./server-host')
 const { Settings } = require('./settings')
+const { SetupFlow } = require('./setup-flow')
+const { locateAll, validate, readVersion } = require('./dsh-locate')
 
 /** Height of the custom title bar strip, in logical pixels. */
 const TITLEBAR_HEIGHT = 34
@@ -32,6 +34,27 @@ const CHROME_FG = '#f0f0f4'
 const APP_BG = '#18181b'
 
 const IS_DEV = process.argv.includes('--dev')
+
+/**
+ * Force the setup screen at startup, whatever is installed.
+ *
+ * Exists so the screen can be exercised — and so a user whose engine is broken can get
+ * to it without the app having to fail first. It never *overrides* a choice made in the
+ * screen: picking an installation there still saves it normally.
+ */
+const FORCE_SETUP = process.argv.includes('--setup')
+
+/**
+ * How many discovered installations to try before giving up and showing setup.
+ *
+ * Each one is a real process launch, so this is a latency budget rather than a
+ * correctness limit: the first working candidate always wins, and the ordering in
+ * dsh-locate.js puts the most likely one first.
+ */
+const ENGINE_SCAN_LIMIT = 5
+
+/** How long a single installation gets to prove it starts. */
+const ENGINE_VALIDATE_TIMEOUT_MS = 45000
 
 /** @type {Settings} */ let settings
 /** @type {ServerHost|null} */ let server = null
@@ -60,14 +83,28 @@ app.on('second-instance', () => {
  */
 function readWhalePath () {
   try {
-    const bin = server?.binPath || require('./server-host').resolveDshBin(settings.get('dshBinPath'))
+    const bin = server?.binPath ||
+      require('./dsh-locate').resolveDshBin(settings.get('dshBinPath'))
     if (!bin) return ''
-    // <npm-root>/@deepseek-ai/dsh/lib/bin.js -> <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg
+    // Two layouts carry the mark, and a source checkout uses the second:
+    //   packaged  <pkg>/node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg
+    //   checkout  <root>/apps/web/dist/favicon.svg
     const pkgRoot = path.resolve(path.dirname(bin), '..')
+    const checkoutRoot = /[\\/]apps[\\/]cli[\\/]lib[\\/]bin\.js$/.test(bin)
+      ? path.resolve(path.dirname(bin), '..', '..', '..')
+      : null
+
     const candidates = [
       path.join(pkgRoot, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'favicon.svg'),
       path.resolve(pkgRoot, '..', 'dsh-web-frontend', 'dist', 'favicon.svg')
     ]
+    if (checkoutRoot) {
+      candidates.unshift(
+        path.join(checkoutRoot, 'packages', 'host', 'frontend-static', 'dist', 'favicon.svg'),
+        path.join(checkoutRoot, 'apps', 'web', 'dist', 'favicon.svg')
+      )
+    }
+
     for (const file of candidates) {
       if (!fs.existsSync(file)) continue
       const svg = fs.readFileSync(file, 'utf8')
@@ -238,9 +275,13 @@ function createWindow () {
 }
 
 /**
- * Point the window at the splash screen, then start the server and navigate to it.
+ * Put the splash screen on screen, replacing whatever window was there.
+ *
+ * The new window is created before the old one is destroyed on purpose: this app quits
+ * when its last window closes, so there must never be a moment with none.
  */
-async function boot () {
+async function showSplash () {
+  const previous = win
   win = createWindow()
 
   // A tiny inline splash screen so the window is never blank while Node boots.
@@ -252,15 +293,26 @@ async function boot () {
     ).catch(() => {})
   }
 
-  const setStatus = (text) => {
-    if (!win || win.isDestroyed()) return
-    win.webContents.executeJavaScript(`window.__setStatus(${JSON.stringify(text)})`).catch(() => {})
-  }
+  if (previous && !previous.isDestroyed()) previous.destroy()
+  return win
+}
+
+/** Write a line to the splash screen, if there is one. */
+function setSplashStatus (text) {
+  if (!win || win.isDestroyed()) return
+  win.webContents.executeJavaScript(`window.__setStatus(${JSON.stringify(text)})`).catch(() => {})
+}
+
+/**
+ * Point the window at the splash screen, then start the server and navigate to it.
+ */
+async function boot () {
+  await showSplash()
 
   server = new ServerHost()
   server.onUnexpectedExit = (detail) => {
     if (quitting) return
-    dialog.showMessageBox(win, {
+    dialog.showMessageBox(win ?? undefined, {
       type: 'warning',
       title: 'DeepSeek Harness',
       message: 'The DeepSeek Harness server stopped unexpectedly; the window will close.',
@@ -272,19 +324,31 @@ async function boot () {
     })
   }
 
-  setStatus('Starting the local server…')
+  setSplashStatus('Looking for the dsh command line tool…')
+
+  const descriptor = await ensureEngine(setSplashStatus)
+  if (!descriptor || quitting) return
+
+  // The setup screen replaces the splash window and closes itself, so by this point
+  // there may be no window left to show the boot progress in.
+  if (!win || win.isDestroyed()) await showSplash()
+
+  setSplashStatus('Starting the local server…')
 
   let url
   try {
     url = await server.start({
+      descriptor,
       preferredPort: Number(settings.get('port')) || 3080,
       lastPort: Number(settings.get('lastPort')) || 0,
-      dshBin: settings.get('dshBinPath') || undefined,
       dshHome: settings.get('dshHome') || undefined
     })
   } catch (error) {
     if (quitting) return
-    dialog.showMessageBox(win, {
+    // The engine was validated before we got here, so a failure at this point is a real
+    // server problem rather than a missing installation; report it rather than sending
+    // the user back to the setup screen.
+    dialog.showMessageBox(win ?? undefined, {
       type: 'error',
       title: 'DeepSeek Harness',
       message: 'Could not start DeepSeek Harness.',
@@ -303,8 +367,100 @@ async function boot () {
     settings.save()
   }
 
-  setStatus('Loading the interface…')
+  setSplashStatus('Loading the interface…')
   await win.loadURL(url)
+}
+
+/**
+ * Make sure there is a dsh installation that actually starts, opening the setup screen
+ * when there is not.
+ *
+ * "Found a file" and "found a working installation" are different things, so each
+ * candidate is briefly run before anything is booted with it. Only when none of them
+ * works does the setup screen appear, offering the two ways out: install it, or point
+ * the app at a folder that already has it.
+ *
+ * @param {(text: string) => void} onStatus splash-screen status updates
+ * @returns {Promise<object|null>} a validated descriptor, or null when the user quit
+ */
+async function ensureEngine (onStatus) {
+  const configured = settings.get('dshBinPath') || undefined
+  const found = locateAll(configured)
+
+  if (FORCE_SETUP) return openSetup({ reason: '', candidates: found, forced: true })
+
+  let reason = ''
+  if (found.length) {
+    onStatus('Checking the dsh installation…')
+    for (const descriptor of found.slice(0, ENGINE_SCAN_LIMIT)) {
+      const result = await validate(descriptor, { timeoutMs: ENGINE_VALIDATE_TIMEOUT_MS })
+      if (result.ok) {
+        recordEngine(descriptor, result.version)
+        return descriptor
+      }
+      if (!reason) reason = `${descriptor.entry}\n${result.detail}`
+    }
+    reason = `A dsh installation was found, but it did not start.\n\n${reason}`
+  }
+
+  return openSetup({ reason, candidates: found })
+}
+
+/** Persist which installation the app is using, for the About box and the next launch. */
+function recordEngine (descriptor, version) {
+  settings.merge({
+    dshBinPath: descriptor.entry,
+    dshVersion: version || ''
+  })
+  settings.save()
+}
+
+/**
+ * Show the setup screen and wait for a validated installation.
+ *
+ * Two roles, and the difference matters for what happens to the existing window:
+ *
+ *   - **startup** (`quitOnCancel`): there is no working engine and only a splash
+ *     window, so the splash is handed over to the setup screen and declining quits.
+ *   - **from the menu** (`!quitOnCancel`): a working engine is already running, so the
+ *     live window is left completely alone. Declining then returns to the app untouched,
+ *     and choosing a new engine is the caller's cue to restart.
+ *
+ * @param {object} context
+ * @param {string} [context.reason] what went wrong, shown when nothing is usable
+ * @param {object[]} [context.candidates] installations already found and tried
+ * @param {object} [behaviour]
+ * @param {boolean} [behaviour.quitOnCancel] see above; defaults to true
+ * @returns {Promise<object|null>} descriptor, or null when the user did not choose one
+ */
+async function openSetup (context, behaviour = {}) {
+  const { quitOnCancel = true } = behaviour
+
+  const flow = new SetupFlow({
+    settings,
+    userData: app.getPath('userData'),
+    whale: readWhalePath()
+  })
+
+  // Only at startup is the splash handed over: the setup screen closes it once its own
+  // window exists, because the app quits when no window is left. The setup screen keeps
+  // itself alive until then.
+  const descriptor = await flow.open(quitOnCancel ? { ...context, replace: win } : context)
+
+  if (descriptor) {
+    recordEngine(descriptor, readVersion(descriptor))
+    if (quitOnCancel) await showSplash()
+    flow.close()
+    return descriptor
+  }
+
+  flow.close()
+
+  if (!quitOnCancel) return null
+
+  quitting = true
+  app.quit()
+  return null
 }
 
 /**
@@ -377,7 +533,7 @@ function buildMenu () {
         { type: 'separator' },
         {
           label: 'About',
-          click: () => dialog.showMessageBox(win, {
+          click: () => dialog.showMessageBox(win ?? undefined, {
             type: 'info',
             title: 'About',
             message: 'DeepSeek Harness',
@@ -385,10 +541,39 @@ function buildMenu () {
               `Desktop shell ${app.getVersion()}\n` +
               `Electron ${process.versions.electron} · Chromium ${process.versions.chrome}\n` +
               `Node ${process.versions.node}\n\n` +
-              `CLI: ${server?.binPath || 'unknown'}\n` +
+              `dsh ${settings.get('dshVersion') || 'unknown'}\n` +
+              `CLI: ${server?.binPath || settings.get('dshBinPath') || 'unknown'}\n` +
               `Server: ${server?.url ? `port ${server.port}` : 'not running'}\n\n` +
               `Settings: ${settings.filePath}`
           })
+        },
+        {
+          label: 'Change Engine…',
+          click: async () => {
+            const chosen = await openSetup({
+              reason: '',
+              candidates: locateAll(settings.get('dshBinPath') || undefined)
+            }, { quitOnCancel: false })
+            if (!chosen) return
+
+            // A different engine means a different server process, and the window is
+            // holding a session against the old one. Relaunching is the one path that
+            // reliably gets every piece back in a consistent state.
+            const answer = await dialog.showMessageBox(win ?? undefined, {
+              type: 'question',
+              title: 'DeepSeek Harness',
+              message: `Use dsh ${settings.get('dshVersion') || ''} from this location?`,
+              detail: `${chosen.entry}\n\nThe app will restart to use it.`,
+              buttons: ['Restart Now', 'Later'],
+              defaultId: 0,
+              cancelId: 1
+            })
+            if (answer.response !== 0) return
+
+            quitting = true
+            app.relaunch()
+            app.quit()
+          }
         }
       ]
     }
