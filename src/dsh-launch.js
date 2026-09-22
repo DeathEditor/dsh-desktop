@@ -211,13 +211,19 @@ function readJson (file) {
  * Build the command line for a descriptor.
  *
  * @param {object} descriptor from describeInstall()
+ * @param {object} [options]
+ * @param {{cmd: string, needsRunAsNode: boolean}} [options.runtime] runtime to launch
+ *   with. Defaults to `resolveNode()`. It is injectable so the Electron-compat branch
+ *   can be tested deterministically: otherwise the assertions depend on whether the
+ *   machine running them happens to have a system Node, and a Windows CI runner (which
+ *   does not) fails tests that a macOS runner passes.
  * @returns {{cmd: string, args: string[], env: NodeJS.ProcessEnv, cwd: string|undefined,
  *            needsRunAsNode: boolean}}
  */
-function spawnPlan (descriptor) {
+function spawnPlan (descriptor, options = {}) {
   if (!descriptor || !descriptor.entry) throw new Error('no dsh installation to launch')
 
-  const node = resolveNode()
+  const node = options.runtime || resolveNode()
   const env = { ...process.env, NO_COLOR: '1' }
 
   // Inherited from Electron and meaningless (or harmful) for a plain Node child --

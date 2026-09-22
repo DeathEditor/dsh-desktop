@@ -19,7 +19,6 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { describeInstall, describeAll, spawnPlan } = require('../src/dsh-launch')
-const { resolveNode } = require('../src/node-runtime')
 const { explainUnusable } = require('../src/dsh-locate')
 
 let failures = 0
@@ -79,7 +78,6 @@ function makeInstall (modulesDir) {
 }
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-locate-test-'))
-const node = resolveNode()
 
 try {
   console.log('== checkouts ==')
@@ -93,7 +91,16 @@ try {
     check('built entry is preferred', all[0].entry, path.join(root, 'apps', 'cli', 'lib', 'bin.js'))
     checkThat('built entry needs no loader', all[0].loader === null)
     checkThat('built entry is marked as coming from a checkout', all[0].fromCheckout === true)
-    check('built entry launches as `node <entry>`', spawnPlan(all[0]).args, [all[0].entry])
+    // Assert the *invariant*, not this machine's argv. A built entry is runnable by a
+    // bare `node <entry>`, so the entry must be last and the only flag allowed in front
+    // of it is --expose-internals, which appears when the bundled Electron runtime is
+    // standing in for Node. Writing the expectation out in full would encode the ambient
+    // runtime: a Windows CI runner has no `node` on PATH, so it legitimately takes that
+    // path, while a macOS runner does not.
+    const builtArgs = spawnPlan(all[0]).args
+    check('the entry point is the last argument', builtArgs[builtArgs.length - 1], all[0].entry)
+    check('a built entry carries no flag but the runtime-compat one',
+      builtArgs.slice(0, -1).filter((arg) => arg !== '--expose-internals'), [])
   }
 
   // --- unbuilt checkout with dependencies: source via tsx ---
@@ -103,7 +110,11 @@ try {
     const all = describeAll(root)
     check('an unbuilt checkout offers only the source shape', all.map((d) => d.kind), ['source'])
     const plan = spawnPlan(all[0])
-    checkThat('source entry is the .ts file', all[0].entry.endsWith('apps/cli/src/bin.ts'))
+    // Built with path.join, not a literal: on Windows the separator is a backslash, and
+    // a hardcoded 'apps/cli/src/bin.ts' would fail there for a reason that has nothing
+    // to do with the code under test.
+    checkThat('source entry is the .ts file',
+      all[0].entry === path.join(root, 'apps', 'cli', 'src', 'bin.ts'), all[0].entry)
     check('source entry passes --import <tsx>', plan.args.slice(0, 1), ['--import'])
     checkThat('the tsx loader is an absolute file URL', /^file:\/\/.*index\.mjs$/.test(plan.args[1]), plan.args[1])
     check('TSX_TSCONFIG_PATH points at the checkout tsconfig', plan.env.TSX_TSCONFIG_PATH, path.join(root, 'tsconfig.json'))
@@ -165,19 +176,44 @@ try {
   {
     const root = path.join(tmp, 'runtime-checkout')
     makeCheckout(root, { built: true, tsx: false, tsconfig: false })
-    const plan = spawnPlan(describeInstall(root))
+    const descriptor = describeInstall(root)
+    const plan = spawnPlan(descriptor)
     check('the runtime is an absolute path', path.isAbsolute(plan.cmd), true)
-
-    if (node.needsRunAsNode) {
-      check('Electron as Node is told to expose internals', plan.args.includes('--expose-internals'), true)
-      checkThat('--expose-internals precedes the entry point', plan.args.indexOf('--expose-internals') < plan.args.length - 1)
-      check('ELECTRON_RUN_AS_NODE is set for Electron', plan.env.ELECTRON_RUN_AS_NODE, '1')
-    } else {
-      check('plain Node does not need --expose-internals', plan.args.includes('--expose-internals'), false)
-      checkThat('ELECTRON_RUN_AS_NODE is removed for plain Node', plan.env.ELECTRON_RUN_AS_NODE === undefined)
-    }
     checkThat('ELECTRON_NO_ATTACH_CONSOLE is not inherited', plan.env.ELECTRON_NO_ATTACH_CONSOLE === undefined)
     check('NO_COLOR is set', plan.env.NO_COLOR, '1')
+  }
+
+  // Both runtime branches are asserted explicitly, with the runtime injected, so the
+  // outcome does not depend on whether the machine running the tests has a system Node.
+  // Testing only the ambient runtime is what let a Windows CI failure through: the
+  // runner has no Node on PATH, so it takes the Electron path, which was untested here.
+  {
+    const root = path.join(tmp, 'runtime-branches')
+    makeCheckout(root, { built: true, tsx: false, tsconfig: false })
+    const descriptor = describeInstall(root)
+
+    const plain = spawnPlan(descriptor, { runtime: { cmd: 'node', needsRunAsNode: false } })
+    check('plain Node runs `node <entry>`', plain.args, [descriptor.entry])
+    checkThat('plain Node does not need --expose-internals', !plain.args.includes('--expose-internals'))
+    checkThat('plain Node is not told ELECTRON_RUN_AS_NODE', plain.env.ELECTRON_RUN_AS_NODE === undefined)
+
+    const electron = spawnPlan(descriptor, { runtime: { cmd: '/path/to/Electron', needsRunAsNode: true } })
+    check('Electron as Node still ends with the entry point', electron.args[electron.args.length - 1], descriptor.entry)
+    check('Electron as Node is told to expose internals', electron.args.includes('--expose-internals'), true)
+    check('ELECTRON_RUN_AS_NODE is set for Electron', electron.env.ELECTRON_RUN_AS_NODE, '1')
+
+    // The same branch must compose with a loader: a source checkout launched by
+    // Electron has to carry --import *and* --expose-internals, with the entry last.
+    const sourceRoot = path.join(tmp, 'runtime-source')
+    makeCheckout(sourceRoot, { built: false, tsx: true, tsconfig: true })
+    const sourceDescriptor = describeAll(sourceRoot)[0]
+    const loaderPlan = spawnPlan(sourceDescriptor, { runtime: { cmd: '/path/to/Electron', needsRunAsNode: true } })
+    check('a source entry under Electron keeps the entry last',
+      loaderPlan.args[loaderPlan.args.length - 1], sourceDescriptor.entry)
+    checkThat('a source entry under Electron keeps --import',
+      loaderPlan.args[0] === '--import' && /index\.mjs$/.test(loaderPlan.args[1]), loaderPlan.args.slice(0, 2).join(' '))
+    check('a source entry under Electron keeps --expose-internals',
+      loaderPlan.args.includes('--expose-internals'), true)
   }
 
   {
